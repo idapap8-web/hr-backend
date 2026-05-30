@@ -21,7 +21,6 @@ db.connect(err => {
   }
   console.log('Uspešno povezano sa bazom podataka!');
   
-  // Baza sa SVIM potrebnim kolonama za napredni obračun
   db.query(`CREATE TABLE IF NOT EXISTS zaposleni (
     id INT AUTO_INCREMENT PRIMARY KEY,
     ime VARCHAR(255) NOT NULL,
@@ -122,95 +121,120 @@ app.delete('/odsustva/:id', (req, res) => {
   });
 });
 
-// === POPOLNA I DETALJNA RUTA ZA OBRAČUN PLATE ===
+// HELPER FUNKCIJA ZA MATEMATIKU SMENA (DA KOD BUDE ČIST)
+function izracunajStatistikuSmena(smene, radnik) {
+  let ukupnoSati = 0; let nocniSati = 0; let praznicniSati = 0; let satiGO = 0; let satiBolovanje = 0;
+
+  smene.forEach(smena => {
+    const pVal = (smena.pocetak || '').toUpperCase().trim();
+    if (pVal === 'GO') { satiGO += 8; return; }
+    if (pVal === 'BOL' || pVal === 'BOLOVANJE') { satiBolovanje += 8; return; }
+    if (!smena.pocetak || !smena.kraj) return;
+
+    let pDelovi = smena.pocetak.split(':');
+    let kDelovi = smena.kraj.split(':');
+    if (pDelovi.length === 0 || kDelovi.length === 0) return;
+
+    let p = parseInt(pDelovi[0]); let k = parseInt(kDelovi[0]);
+    if (isNaN(p) || isNaN(k)) return;
+    if (k === 0) k = 24;
+
+    let trajanje = k > p ? k - p : 24 - p + k;
+    ukupnoSati += trajanje;
+
+    let n_poc = parseInt((radnik.nocna_pocetak || '22:00').split(':')[0]) || 22;
+    let n_kr = parseInt((radnik.nocna_kraj || '06:00').split(':')[0]) || 6;
+
+    for (let sat = p; sat !== k; sat = (sat + 1) % 24) {
+      if (n_poc > n_kr) {
+        if (sat >= n_poc || sat < n_kr) nocniSati++;
+      } else {
+        if (sat >= n_poc && sat < n_kr) nocniSati++;
+      }
+    }
+  });
+
+  const satnica = parseFloat(radnik.satnica || 0);
+  const nocniBonus = parseInt(radnik.nocni_bonus) || 26;
+  const goProcenat = parseInt(radnik.go_procenat) || 100;
+  const bolovanjeProcenat = parseInt(radnik.bolovanje_procenat) || 65;
+
+  const zaradaRedovna = Math.max(0, ukupnoSati - nocniSati) * satnica;
+  const cenaNocnog = satnica * (1 + nocniBonus / 100);
+  const zaradaNocna = nocniSati * cenaNocnog;
+  const zaradaOdRada = zaradaRedovna + zaradaNocna;
+  const zaradaGO = satiGO * satnica * (goProcenat / 100);
+  const zaradaBolovanje = satiBolovanje * satnica * (bolovanjeProcenat / 100);
+  const plata = zaradaOdRada + zaradaGO + zaradaBolovanje;
+
+  return {
+    ukupnoSati, nocniSati, praznicniSati, satiGO, satiBolovanje,
+    zaradaOdRada: Math.round(zaradaOdRada), zaradaGO: Math.round(zaradaGO),
+    zaradaBolovanje: Math.round(zaradaBolovanje), plata: Math.round(plata)
+  };
+}
+
+// === MESEČNI IZVEŠTAJ ===
 app.get('/izvestaj/:id', (req, res) => {
   const radnikId = req.params.id;
   const mesec = parseInt(req.query.mesec);
   const godina = parseInt(req.query.godina);
 
   db.query('SELECT * FROM zaposleni WHERE id = ?', [radnikId], (err, radnikRes) => {
-    if (err || !radnikRes || radnikRes.length === 0) {
-      return res.status(404).json({ poruka: "Radnik nije nađen u bazi" });
-    }
+    if (err || !radnikRes || radnikRes.length === 0) return res.status(404).json({ poruka: "Radnik nije nađen" });
     
     const radnik = radnikRes[0];
     const qSmene = 'SELECT * FROM raspored WHERE zaposleni_id = ? AND MONTH(datum) = ? AND YEAR(datum) = ?';
     
     db.query(qSmene, [radnikId, mesec, godina], (err, smene) => {
       if (err) return res.status(500).json({ greska: err.message });
+      
+      const statistika = izracunajStatistikuSmena(Array.isArray(smene) ? smene : [], radnik);
+      res.json({
+        satnica: radnik.satnica,
+        nocniBonus: radnik.nocni_bonus,
+        praznikBonus: radnik.praznik_bonus,
+        goProcenat: radnik.go_procenat,
+        bolovanjeProcenat: radnik.bolovanje_procenat,
+        ...statistika
+      });
+    });
+  });
+});
 
-      let ukupnoSati = 0; 
-      let nocniSati = 0; 
-      let praznicniSati = 0; 
-      let satiGO = 0; 
-      let satiBolovanje = 0;
+// === NOVO: GODIŠNJI IZVEŠTAJ ===
+app.get('/godisnji-izvestaj/:id', (req, res) => {
+  const radnikId = req.params.id;
+  const godina = parseInt(req.query.godina);
 
+  db.query('SELECT * FROM zaposleni WHERE id = ?', [radnikId], (err, radnikRes) => {
+    if (err || !radnikRes || radnikRes.length === 0) return res.status(404).json({ poruka: "Radnik nije nađen" });
+    
+    const radnik = radnikRes[0];
+    const qSmene = 'SELECT * FROM raspored WHERE zaposleni_id = ? AND YEAR(datum) = ?';
+    
+    db.query(qSmene, [radnikId, godina], (err, smene) => {
+      if (err) return res.status(500).json({ greska: err.message });
+      
       const sigurneSmene = Array.isArray(smene) ? smene : [];
-
-      sigurneSmene.forEach(smena => {
-        const pVal = (smena.pocetak || '').toUpperCase().trim();
-        
-        // Provera unosa direktno preko planera
-        if (pVal === 'GO') { satiGO += 8; return; }
-        if (pVal === 'BOL' || pVal === 'BOLOVANJE') { satiBolovanje += 8; return; }
-        if (!smena.pocetak || !smena.kraj) return;
-
-        let pDelovi = smena.pocetak.split(':');
-        let kDelovi = smena.kraj.split(':');
-        if (pDelovi.length === 0 || kDelovi.length === 0) return;
-
-        let p = parseInt(pDelovi[0]);
-        let k = parseInt(kDelovi[0]);
-        if (isNaN(p) || isNaN(k)) return;
-        if (k === 0) k = 24;
-
-        let trajanje = k > p ? k - p : 24 - p + k;
-        ukupnoSati += trajanje;
-
-        // Precizna konfiguracija noćne smene iz profila radnika
-        let n_poc = parseInt((radnik.nocna_pocetak || '22:00').split(':')[0]) || 22;
-        let n_kr = parseInt((radnik.nocna_kraj || '06:00').split(':')[0]) || 6;
-
-        for (let sat = p; sat !== k; sat = (sat + 1) % 24) {
-          if (n_poc > n_kr) {
-            if (sat >= n_poc || sat < n_kr) nocniSati++;
-          } else {
-            if (sat >= n_poc && sat < n_kr) nocniSati++;
-          }
-        }
+      let poMesecima = Array(12).fill(0).map((_, i) => ({ mesec: i + 1, sati: 0, zarada: 0 }));
+      
+      // Filtriramo sate i zaradu po svakom mesecu pojedinačno
+      poMesecima = poMesecima.map(m => {
+        const smeneZaMesec = sigurneSmene.filter(s => new Date(s.datum).getMonth() + 1 === m.mesec);
+        const stats = izracunajStatistikuSmena(smeneZaMesec, radnik);
+        return { mesec: m.mesec, sati: stats.ukupnoSati + stats.satiGO + stats.satiBolovanje, zarada: stats.plata };
       });
 
-      // Kompletna matematika sa radnim postavkama radnika
-      const satnica = parseFloat(radnik.satnica || 0);
-      const nocniBonus = parseInt(radnik.nocni_bonus) || 26;
-      const praznikBonus = parseInt(radnik.praznik_bonus) || 110;
-      const goProcenat = parseInt(radnik.go_procenat) || 100;
-      const bolovanjeProcenat = parseInt(radnik.bolovanje_procenat) || 65;
-
-      const zaradaRedovna = Math.max(0, ukupnoSati - nocniSati) * satnica;
-      const cenaNocnog = satnica * (1 + nocniBonus / 100);
-      const zaradaNocna = nocniSati * cenaNocnog;
-      
-      const zaradaOdRada = zaradaRedovna + zaradaNocna;
-      const zaradaGO = satiGO * satnica * (goProcenat / 100);
-      const zaradaBolovanje = satiBolovanje * satnica * (bolovanjeProcenat / 100);
-      const ukupnaPlata = zaradaOdRada + zaradaGO + zaradaBolovanje;
+      const ukupnoSatiGodina = poMesecima.reduce((a, b) => a + b.sati, 0);
+      const ukupnoZaradaGodina = poMesecima.reduce((a, b) => a + b.zarada, 0);
 
       res.json({
-        satnica, 
-        ukupnoSati, 
-        nocniSati, 
-        praznicniSati,
-        satiGO, 
-        satiBolovanje, 
-        goProcenat, 
-        bolovanjeProcenat,
-        nocniBonus,
-        praznikBonus,
-        zaradaOdRada: Math.round(zaradaOdRada), 
-        zaradaGO: Math.round(zaradaGO), 
-        zaradaBolovanje: Math.round(zaradaBolovanje),
-        plata: Math.round(ukupnaPlata)
+        godina,
+        satnica: radnik.satnica,
+        ukupnoSatiGodina,
+        ukupnoZaradaGodina,
+        poMesecima
       });
     });
   });

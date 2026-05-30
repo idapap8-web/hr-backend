@@ -1,210 +1,215 @@
 const express = require('express');
 const mysql = require('mysql2');
 const cors = require('cors');
+require('dotenv').config();
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// NOVO: Povezivanje sa bazom preko promenljivih okruženja (Environment Variables)
-// Ako je sajt na internetu, čitaće prave podatke, a kod tebe na računaru čitaće 'localhost'
-const db = mysql.createConnection({
-    host: process.env.DB_HOST || 'localhost',
-    user: process.env.DB_USER || 'root',
-    password: process.env.DB_PASSWORD || '',
-    database: process.env.DB_NAME || 'radno_vreme',
-    port: process.env.DB_PORT || 3306
+// Povezivanje sa bazom (Aiven ili lokalna)
+const db = mysql.createConnection(process.env.DATABASE_URL || {
+  host: 'localhost',
+  user: 'root',
+  password: '',
+  database: 'radno_vreme'
 });
 
-db.connect((err) => {
-    if (err) console.error('Greška pri povezivanju sa bazom:', err);
-    else console.log('Povezano sa bazom podataka.');
+db.connect(err => {
+  if (err) {
+    console.error('Greška pri povezivanju sa bazom:', err);
+    return;
+  }
+  console.log('Uspešno povezano sa baze podataka!');
+  
+  // Automatsko kreiranje tabela ako ne postoje
+  db.query(`CREATE TABLE IF NOT EXISTS zaposleni (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    ime VARCHAR(255) NOT NULL,
+    prezime VARCHAR(255) NOT NULL,
+    pozicija VARCHAR(255),
+    satnica DECIMAL(10,2) DEFAULT 0,
+    nocna_pocetak VARCHAR(5) DEFAULT '22:00',
+    nocna_kraj VARCHAR(5) DEFAULT '06:00',
+    nocni_bonus INT DEFAULT 26,
+    praznik_bonus INT DEFAULT 110,
+    go_procenat INT DEFAULT 100,
+    bolovanje_procenat INT DEFAULT 65
+  )`);
+
+  db.query(`CREATE TABLE IF NOT EXISTS raspored (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    zaposleni_id INT,
+    datum DATE NOT NULL,
+    pocetak VARCHAR(5),
+    kraj VARCHAR(5),
+    UNIQUE KEY radnik_datum (zaposleni_id, datum)
+  )`);
+
+  db.query(`CREATE TABLE IF NOT EXISTS odsustva (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    zaposleni_id INT,
+    datum_od DATE NOT NULL,
+    datum_do DATE NOT NULL,
+    tip VARCHAR(20) DEFAULT 'GO'
+  )`);
 });
 
-// Zaposleni - CRUD operacije
+// --- RUTE ZA ZAPOSLENE ---
 app.get('/zaposleni', (req, res) => {
-  db.query('SELECT * FROM zaposleni', (err, rezultati) => {
-    if (err) return res.status(500).send('Greška');
-    res.json(rezultati);
+  db.query('SELECT * FROM zaposleni', (err, results) => {
+    if (err) return res.status(500).json(err);
+    res.json(results);
   });
 });
 
 app.post('/zaposleni', (req, res) => {
-  const { ime, prezime, pozicija, satnica, nocna_pocetak, nocna_kraj, nocni_bonus, praznik_bonus, go_procenat, bolovanje_procenat } = req.body;
-  const sql = 'INSERT INTO zaposleni (ime, prezime, pozicija, satnica, nocna_pocetak, nocna_kraj, nocni_bonus, praznik_bonus, go_procenat, bolovanje_procenat) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)';
-  const vrednosti = [ime, prezime, pozicija, satnica || 0, nocna_pocetak || '22:00', nocna_kraj || '06:00', nocni_bonus || 0, praznik_bonus || 0, go_procenat || 100, bolovanje_procenat || 65];
-  
-  db.query(sql, vrednosti, (err) => {
-    if (err) return res.status(500).send('Greška');
-    res.status(201).json({ poruka: 'Zaposleni uspešno dodat' });
+  const q = 'INSERT INTO zaposleni SET ?';
+  db.query(q, req.body, (err, result) => {
+    if (err) return res.status(500).json(err);
+    res.json({ id: result.insertId, ...req.body });
   });
 });
 
 app.put('/zaposleni/:id', (req, res) => {
-  const { ime, prezime, pozicija, satnica, nocna_pocetak, nocna_kraj, nocni_bonus, praznik_bonus, go_procenat, bolovanje_procenat } = req.body;
-  const sql = 'UPDATE zaposleni SET ime=?, prezime=?, pozicija=?, satnica=?, nocna_pocetak=?, nocna_kraj=?, nocni_bonus=?, praznik_bonus=?, go_procenat=?, bolovanje_procenat=? WHERE id=?';
-  const vrednosti = [ime, prezime, pozicija, satnica || 0, nocna_pocetak || '22:00', nocna_kraj || '06:00', nocni_bonus || 0, praznik_bonus || 0, go_procenat || 100, bolovanje_procenat || 65, req.params.id];
-  
-  db.query(sql, vrednosti, (err) => {
-    if (err) return res.status(500).send('Greška');
-    res.send('Podaci izmenjeni');
+  db.query('UPDATE zaposleni SET ? WHERE id = ?', [req.body, req.params.id], (err) => {
+    if (err) return res.status(500).json(err);
+    res.json({ id: req.params.id, ...req.body });
   });
 });
 
 app.delete('/zaposleni/:id', (req, res) => {
-  db.query('DELETE FROM zaposleni WHERE id=?', [req.params.id], (err) => {
-    if (err) return res.status(500).send('Greška');
-    res.send('Obrisan');
+  db.query('DELETE FROM zaposleni WHERE id = ?', [req.params.id], (err) => {
+    if (err) return res.status(500).json(err);
+    res.json({ poruka: "Obrisan radnik" });
   });
 });
 
-// Evidencija (Clock in/out)
-app.post('/evidencija/dolazak', (req, res) => {
-  db.query('INSERT INTO evidencija (zaposleni_id, vreme_dolaska) VALUES (?, NOW())', [req.body.zaposleni_id], (err) => {
-    if (err) return res.status(500).send('Greška');
-    res.send('Dolazak evidentiran');
-  });
-});
-
-app.put('/evidencija/odlazak', (req, res) => {
-  db.query('UPDATE evidencija SET vreme_odlaska = NOW() WHERE zaposleni_id = ? AND vreme_odlaska IS NULL', [req.body.zaposleni_id], (err) => {
-    if (err) return res.status(500).send('Greška');
-    res.send('Odlazak evidentiran');
-  });
-});
-
-// Nedeljni planer
+// --- RUTE ZA RASPORED (PO DATUMIMA) ---
 app.get('/raspored', (req, res) => {
-  db.query('SELECT * FROM raspored', (err, rezultati) => {
-    if (err) return res.status(500).send('Greška');
-    res.json(rezultati);
+  db.query('SELECT zaposleni_id, DATE_FORMAT(datum, "%Y-%m-%d") as datum, pocetak, kraj FROM raspored', (err, results) => {
+    if (err) return res.status(500).json(err);
+    res.json(results);
   });
 });
 
 app.post('/raspored', (req, res) => {
-  const { zaposleni_id, dan, pocetak, kraj } = req.body;
-  db.query('DELETE FROM raspored WHERE zaposleni_id = ? AND dan = ?', [zaposleni_id, dan], () => {
-    if (!pocetak && !kraj) return res.send('Uklonjeno');
-    db.query('INSERT INTO raspored (zaposleni_id, dan, pocetak, kraj) VALUES (?, ?, ?, ?)', [zaposleni_id, dan, pocetak, kraj], (err) => {
-      if (err) return res.status(500).send('Greška');
-      res.send('Sačuvano');
-    });
+  const { zaposleni_id, datum, pocetak, kraj } = req.body;
+  const q = 'INSERT INTO raspored (zaposleni_id, datum, pocetak, kraj) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE pocetak = ?, kraj = ?';
+  db.query(q, [zaposleni_id, datum, pocetak, kraj, pocetak, kraj], (err) => {
+    if (err) return res.status(500).json(err);
+    res.json({ status: "Sačuvano" });
   });
 });
 
-// Odsustva (GO i Bolovanje)
+// --- RUTE ZA ODSUSTVA ---
 app.get('/odsustva', (req, res) => {
-  db.query('SELECT * FROM odsustva', (err, rezultati) => {
-    if (err) return res.status(500).send('Greška');
-    res.json(rezultati);
+  db.query('SELECT id, zaposleni_id, DATE_FORMAT(datum_od, "%Y-%m-%d") as datum_od, DATE_FORMAT(datum_do, "%Y-%m-%d") as datum_do, tip FROM odsustva', (err, results) => {
+    if (err) return res.status(500).json(err);
+    res.json(results);
   });
 });
 
 app.post('/odsustva', (req, res) => {
-  const { zaposleni_id, datum_od, datum_do, tip } = req.body;
-  db.query('INSERT INTO odsustva (zaposleni_id, datum_od, datum_do, tip) VALUES (?, ?, ?, ?)', [zaposleni_id, datum_od, datum_do, tip], (err) => {
-    if (err) return res.status(500).send('Greška');
-    res.send('Odsustvo sačuvano');
+  db.query('INSERT INTO odsustva SET ?', req.body, (err) => {
+    if (err) return res.status(500).json(err);
+    res.json({ status: "Odsustvo dodato" });
   });
 });
 
 app.delete('/odsustva/:id', (req, res) => {
-  db.query('DELETE FROM odsustva WHERE id=?', [req.params.id], (err) => {
-    if (err) return res.status(500).send('Greška');
-    res.send('Odsustvo obrisano');
+  db.query('DELETE FROM odsustva WHERE id = ?', [req.params.id], (err) => {
+    if (err) return res.status(500).json(err);
+    res.json({ status: "Obrisan odsustvo" });
   });
 });
 
-// Obračun zarada
-const drzavniPraznici = ['01-01', '01-02', '01-07', '02-15', '02-16', '05-01', '05-02', '11-11'];
-
+// --- MAGIČNI REAL-TIME OBRAČUN IZ RASPOREDA ---
 app.get('/izvestaj/:id', (req, res) => {
-  const zaposleniId = req.params.id;
-  const mesec = req.query.mesec ? parseInt(req.query.mesec) : new Date().getMonth() + 1;
-  const godina = req.query.godina ? parseInt(req.query.godina) : new Date().getFullYear();
+  const radnikId = req.params.id;
+  const { mesec, godina } = req.query;
 
-  db.query('SELECT * FROM zaposleni WHERE id = ?', [zaposleniId], (err, radnici) => {
-    if (err || radnici.length === 0) return res.status(404).send('Zaposleni nije pronađen');
-    const radnik = radnici[0];
+  // 1. Izvuci podatke o radniku
+  db.query('SELECT * FROM zaposleni WHERE id = ?', [radnikId], (err, radnikRes) => {
+    if (err || radnikRes.length === 0) return res.status(404).json({ poruka: "Radnik nije nađen" });
+    const radnik = radnikRes[0];
 
-    db.query('SELECT * FROM evidencija WHERE zaposleni_id = ? AND vreme_odlaska IS NOT NULL', [zaposleniId], (err, smene) => {
+    // 2. Izvuci sve smene iz tog meseca i godine
+    const qSmene = 'SELECT * FROM raspored WHERE zaposleni_id = ? AND MONTH(datum) = ? AND YEAR(datum) = ?';
+    db.query(qSmene, [radnikId, mesec, godina], (err, smene) => {
+      if (err) return res.status(500).json(err);
+
       let ukupnoSati = 0;
-      let praznicniSati = 0;
       let nocniSati = 0;
+      let praznicniSati = 0; // Za buduću nadogradnju kalendara praznika
+      let satiGO = 0;
+      let satiBolovanje = 0;
 
       smene.forEach(smena => {
-        const dolazak = new Date(smena.vreme_dolaska);
-        if (dolazak.getMonth() + 1 === mesec && dolazak.getFullYear() === godina) {
-          const odlazak = new Date(smena.vreme_odlaska);
-          const sati = (odlazak - dolazak) / (1000 * 60 * 60);
-          ukupnoSati += sati;
+        const pVal = (smena.pocetak || '').toUpperCase();
+        
+        // Ako je u planer upisano GO ili BOL direktno
+        if (pVal === 'GO') {
+          satiGO += 8; // Podrazumevano 8 sati za praznik/odmor
+          return;
+        }
+        if (pVal === 'BOL') {
+          satiBolovanje += 8;
+          return;
+        }
 
-          const formatiranDatum = `${String(dolazak.getMonth() + 1).padStart(2, '0')}-${String(dolazak.getDate()).padStart(2, '0')}`;
-          if (drzavniPraznici.includes(formatiranDatum)) praznicniSati += sati;
+        if (!smena.pocetak || !smena.kraj) return;
 
-          const satDolaska = dolazak.getHours();
-          const pocetakNocne = radnik.nocna_pocetak ? parseInt(radnik.nocna_pocetak.split(':')[0]) : 22; 
-          const krajNocne = radnik.nocna_kraj ? parseInt(radnik.nocna_kraj.split(':')[0]) : 6;
-          if (satDolaska >= pocetakNocne || satDolaska < krajNocne) nocniSati += sati;
+        let p = parseInt(smena.pocetak.split(':')[0]);
+        let k = parseInt(smena.kraj.split(':')[0]);
+        if (isNaN(p) || isNaN(k)) return;
+        if (k === 0) k = 24;
+
+        let trajanje = k > p ? k - p : 24 - p + k;
+        ukupnoSati += trajanje;
+
+        // Izračunaj noćne sate (između 22:00 i 06:00)
+        let n_poc = parseInt(radnik.nocna_pocetak.split(':')[0]);
+        let n_kr = parseInt(radnik.nocna_kraj.split(':')[0]);
+
+        for (let sat = p; sat !== k; sat = (sat + 1) % 24) {
+          if (n_poc > n_kr) {
+            if (sat >= n_poc || sat < n_kr) nocniSati++;
+          } else {
+            if (sat >= n_poc && sat < n_kr) nocniSati++;
+          }
         }
       });
 
-      db.query('SELECT * FROM odsustva WHERE zaposleni_id = ?', [zaposleniId], (err, odsustva) => {
-        let satiGO = 0;
-        let satiBolovanje = 0;
+      // Finansijski proračun
+      const satnica = parseFloat(radnik.satnica || 0);
+      const zaradaRedovna = (ukupnoSati - nocniSati) * satnica;
+      const cenaNocnog = satnica * (1 + parseInt(radnik.nocni_bonus) / 100);
+      const zaradaNocna = nocniSati * cenaNocnog;
+      const zaradaOdRada = zaradaRedovna + zaradaNocna;
 
-        odsustva.forEach(odsustvo => {
-          const start = new Date(odsustvo.datum_od);
-          const end = new Date(odsustvo.datum_do);
-          
-          let trenutni = new Date(start.getTime());
-          while (trenutni <= end) {
-            if (trenutni.getMonth() + 1 === mesec && trenutni.getFullYear() === godina) {
-              const danUNedelji = trenutni.getDay();
-              if (danUNedelji >= 1 && danUNedelji <= 5) {
-                if (odsustvo.tip === 'GO') satiGO += 8;
-                else if (odsustvo.tip === 'BOLOVANJE') satiBolovanje += 8;
-              }
-            }
-            trenutni.setDate(trenutni.getDate() + 1);
-          }
-        });
+      const zaradaGO = satiGO * satnica * (parseInt(radnik.go_procenat) / 100);
+      const zaradaBolovanje = satiBolovanje * satnica * (parseInt(radnik.bolovanje_procenat) / 100);
 
-        const osnovnaSatnica = parseFloat(radnik.satnica) || 0;
-        const redovniSati = ukupnoSati - nocniSati - praznicniSati;
-        const nocniBonus = parseFloat(radnik.nocni_bonus) || 0;
-        const praznikBonus = parseFloat(radnik.praznik_bonus) || 0;
-        const goProcenat = parseFloat(radnik.go_procenat) || 100;
-        const bolovanjeProcenat = parseFloat(radnik.bolovanje_procenat) || 65;
+      const ukupnaPlata = zaradaOdRada + zaradaGO + zaradaBolovanje;
 
-        const zaradaOdRada = (redovniSati * osnovnaSatnica) + 
-                             (nocniSati * osnovnaSatnica * (1 + (nocniBonus / 100))) + 
-                             (praznicniSati * osnovnaSatnica * (1 + (praznikBonus / 100)));
-                             
-        const zaradaGO = satiGO * osnovnaSatnica * (goProcenat / 100);
-        const zaradaBolovanje = satiBolovanje * osnovnaSatnica * (bolovanjeProcenat / 100);
-        
-        const ukupnaPlata = zaradaOdRada + zaradaGO + zaradaBolovanje;
-
-        res.json({ 
-          ukupnoSati: ukupnoSati.toFixed(1), 
-          praznicniSati: praznicniSati.toFixed(1), 
-          nocniSati: nocniSati.toFixed(1),
-          satiGO, satiBolovanje,
-          zaradaOdRada: zaradaOdRada.toFixed(2),
-          zaradaGO: zaradaGO.toFixed(2),
-          zaradaBolovanje: zaradaBolovanje.toFixed(2),
-          plata: ukupnaPlata.toFixed(2), 
-          satnica: osnovnaSatnica,
-          goProcenat, bolovanjeProcenat
-        });
+      res.json({
+        satnica: satnica,
+        ukupnoSati: ukupnoSati,
+        nocniSati: nocniSati,
+        praznicniSati: praznicniSati,
+        satiGO: satiGO,
+        satiBolovanje: satiBolovanje,
+        goProcenat: radnik.go_procenat,
+        bolovanjeProcenat: radnik.bolovanje_procenat,
+        zaradaOdRada: Math.round(zaradaOdRada),
+        zaradaGO: Math.round(zaradaGO),
+        zaradaBolovanje: Math.round(zaradaBolovanje),
+        plata: Math.round(ukupnaPlata)
       });
     });
   });
 });
 
-// NOVO: Render servisi sami dodeljuju PORT, pa ne smemo fiksirati na 3000
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server pokrenut na portu ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server radi na portu ${PORT}`));

@@ -21,6 +21,7 @@ db.connect(err => {
   }
   console.log('Uspešno povezano sa bazom podataka!');
   
+  // Baza sa SVIM potrebnim kolonama za napredni obračun
   db.query(`CREATE TABLE IF NOT EXISTS zaposleni (
     id INT AUTO_INCREMENT PRIMARY KEY,
     ime VARCHAR(255) NOT NULL,
@@ -53,38 +54,40 @@ db.connect(err => {
   )`);
 });
 
+// === RUTE ZA ZAPOSLENE ===
 app.get('/zaposleni', (req, res) => {
   db.query('SELECT * FROM zaposleni', (err, results) => {
-    if (err) return res.status(500).json(err);
-    res.json(results || []);
+    if (err) return res.status(500).json({ greska: err.message });
+    res.json(Array.isArray(results) ? results : []);
   });
 });
 
 app.post('/zaposleni', (req, res) => {
   db.query('INSERT INTO zaposleni SET ?', req.body, (err, result) => {
-    if (err) return res.status(500).json(err);
+    if (err) return res.status(500).json({ greska: err.message });
     res.json({ id: result.insertId, ...req.body });
   });
 });
 
 app.put('/zaposleni/:id', (req, res) => {
   db.query('UPDATE zaposleni SET ? WHERE id = ?', [req.body, req.params.id], (err) => {
-    if (err) return res.status(500).json(err);
+    if (err) return res.status(500).json({ greska: err.message });
     res.json({ id: req.params.id, ...req.body });
   });
 });
 
 app.delete('/zaposleni/:id', (req, res) => {
   db.query('DELETE FROM zaposleni WHERE id = ?', [req.params.id], (err) => {
-    if (err) return res.status(500).json(err);
+    if (err) return res.status(500).json({ greska: err.message });
     res.json({ poruka: "Obrisan radnik" });
   });
 });
 
+// === RUTE ZA RASPORED ===
 app.get('/raspored', (req, res) => {
   db.query('SELECT zaposleni_id, DATE_FORMAT(datum, "%Y-%m-%d") as datum, pocetak, kraj FROM raspored', (err, results) => {
-    if (err) return res.status(500).json(err);
-    res.json(results || []);
+    if (err) return res.status(500).json({ greska: err.message });
+    res.json(Array.isArray(results) ? results : []);
   });
 });
 
@@ -92,57 +95,62 @@ app.post('/raspored', (req, res) => {
   const { zaposleni_id, datum, pocetak, kraj } = req.body;
   const q = 'INSERT INTO raspored (zaposleni_id, datum, pocetak, kraj) VALUES (?, ?, ?, ?) ON DUPLICATE KEY UPDATE pocetak = ?, kraj = ?';
   db.query(q, [zaposleni_id, datum, pocetak, kraj, pocetak, kraj], (err) => {
-    if (err) return res.status(500).json(err);
+    if (err) return res.status(500).json({ greska: err.message });
     res.json({ status: "Sačuvano" });
   });
 });
 
+// === RUTE ZA ODSUSTVA ===
 app.get('/odsustva', (req, res) => {
   db.query('SELECT id, zaposleni_id, DATE_FORMAT(datum_od, "%Y-%m-%d") as datum_od, DATE_FORMAT(datum_do, "%Y-%m-%d") as datum_do, tip FROM odsustva', (err, results) => {
-    if (err) return res.status(500).json(err);
-    res.json(results || []);
+    if (err) return res.status(500).json({ greska: err.message });
+    res.json(Array.isArray(results) ? results : []);
   });
 });
 
 app.post('/odsustva', (req, res) => {
   db.query('INSERT INTO odsustva SET ?', req.body, (err) => {
-    if (err) return res.status(500).json(err);
+    if (err) return res.status(500).json({ greska: err.message });
     res.json({ status: "Odsustvo dodato" });
   });
 });
 
 app.delete('/odsustva/:id', (req, res) => {
   db.query('DELETE FROM odsustva WHERE id = ?', [req.params.id], (err) => {
-    if (err) return res.status(500).json(err);
-    res.json({ status: "Obrisan odsustvo" });
+    if (err) return res.status(500).json({ greska: err.message });
+    res.json({ status: "Obrisano odsustvo" });
   });
 });
 
-// POPRAVLJENA RUTA ZA IZVEŠTAJ
+// === POPOLNA I DETALJNA RUTA ZA OBRAČUN PLATE ===
 app.get('/izvestaj/:id', (req, res) => {
   const radnikId = req.params.id;
   const mesec = parseInt(req.query.mesec);
   const godina = parseInt(req.query.godina);
 
-  console.log(`Tražim izveštaj za Radnika ID: ${radnikId}, Mesec: ${mesec}, Godina: ${godina}`);
-
   db.query('SELECT * FROM zaposleni WHERE id = ?', [radnikId], (err, radnikRes) => {
-    if (err) return res.status(500).json({ poruka: "Greška u bazi", detalji: err.message });
-    if (!radnikRes || radnikRes.length === 0) {
-      return res.status(404).json({ poruka: `Radnik sa ID ${radnikId} nije nađen u bazi.` });
+    if (err || !radnikRes || radnikRes.length === 0) {
+      return res.status(404).json({ poruka: "Radnik nije nađen u bazi" });
     }
     
     const radnik = radnikRes[0];
     const qSmene = 'SELECT * FROM raspored WHERE zaposleni_id = ? AND MONTH(datum) = ? AND YEAR(datum) = ?';
     
     db.query(qSmene, [radnikId, mesec, godina], (err, smene) => {
-      if (err) return res.status(500).json({ poruka: "Greška u smenama", detalji: err.message });
+      if (err) return res.status(500).json({ greska: err.message });
 
-      let ukupnoSati = 0; let nocniSati = 0; let praznicniSati = 0; let satiGO = 0; let satiBolovanje = 0;
+      let ukupnoSati = 0; 
+      let nocniSati = 0; 
+      let praznicniSati = 0; 
+      let satiGO = 0; 
+      let satiBolovanje = 0;
+
       const sigurneSmene = Array.isArray(smene) ? smene : [];
 
       sigurneSmene.forEach(smena => {
         const pVal = (smena.pocetak || '').toUpperCase().trim();
+        
+        // Provera unosa direktno preko planera
         if (pVal === 'GO') { satiGO += 8; return; }
         if (pVal === 'BOL' || pVal === 'BOLOVANJE') { satiBolovanje += 8; return; }
         if (!smena.pocetak || !smena.kraj) return;
@@ -159,6 +167,7 @@ app.get('/izvestaj/:id', (req, res) => {
         let trajanje = k > p ? k - p : 24 - p + k;
         ukupnoSati += trajanje;
 
+        // Precizna konfiguracija noćne smene iz profila radnika
         let n_poc = parseInt((radnik.nocna_pocetak || '22:00').split(':')[0]) || 22;
         let n_kr = parseInt((radnik.nocna_kraj || '06:00').split(':')[0]) || 6;
 
@@ -171,19 +180,36 @@ app.get('/izvestaj/:id', (req, res) => {
         }
       });
 
+      // Kompletna matematika sa radnim postavkama radnika
       const satnica = parseFloat(radnik.satnica || 0);
+      const nocniBonus = parseInt(radnik.nocni_bonus) || 26;
+      const praznikBonus = parseInt(radnik.praznik_bonus) || 110;
+      const goProcenat = parseInt(radnik.go_procenat) || 100;
+      const bolovanjeProcenat = parseInt(radnik.bolovanje_procenat) || 65;
+
       const zaradaRedovna = Math.max(0, ukupnoSati - nocniSati) * satnica;
-      const cenaNocnog = satnica * (1 + (parseInt(radnik.nocni_bonus) || 26) / 100);
+      const cenaNocnog = satnica * (1 + nocniBonus / 100);
       const zaradaNocna = nocniSati * cenaNocnog;
+      
       const zaradaOdRada = zaradaRedovna + zaradaNocna;
-      const zaradaGO = satiGO * satnica * ((parseInt(radnik.go_procenat) || 100) / 100);
-      const zaradaBolovanje = satiBolovanje * satnica * ((parseInt(radnik.bolovanje_procenat) || 65) / 100);
+      const zaradaGO = satiGO * satnica * (goProcenat / 100);
+      const zaradaBolovanje = satiBolovanje * satnica * (bolovanjeProcenat / 100);
       const ukupnaPlata = zaradaOdRada + zaradaGO + zaradaBolovanje;
 
       res.json({
-        satnica: satnica, ukupnoSati: ukupnoSati, nocniSati: nocniSati, praznicniSati: praznicniSati,
-        satiGO: satiGO, satiBolovanje: satiBolovanje, goProcenat: radnik.go_procenat, bolovanjeProcenat: radnik.bolovanje_procenat,
-        zaradaOdRada: Math.round(zaradaOdRada), zaradaGO: Math.round(zaradaGO), zaradaBolovanje: Math.round(zaradaBolovanje),
+        satnica, 
+        ukupnoSati, 
+        nocniSati, 
+        praznicniSati,
+        satiGO, 
+        satiBolovanje, 
+        goProcenat, 
+        bolovanjeProcenat,
+        nocniBonus,
+        praznikBonus,
+        zaradaOdRada: Math.round(zaradaOdRada), 
+        zaradaGO: Math.round(zaradaGO), 
+        zaradaBolovanje: Math.round(zaradaBolovanje),
         plata: Math.round(ukupnaPlata)
       });
     });

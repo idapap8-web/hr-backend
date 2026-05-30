@@ -177,5 +177,6 @@ app.get('/izvestaj/:id', (req, res) => {
   });
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server radi na portu ${PORT}`));
+// Postavljen fiksni port 3000 za lakšu lokalnu komunikaciju
+const PORT = 3000;
+app.listen(PORT, () => console.log(`Server uspešno radi na portu ${PORT}`));

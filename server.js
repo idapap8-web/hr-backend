@@ -121,8 +121,8 @@ app.delete('/odsustva/:id', (req, res) => {
   });
 });
 
-// HELPER FUNKCIJA ZA MATEMATIKU SMENA (DA KOD BUDE ČIST)
-function izracunajStatistikuSmena(smene, radnik) {
+// ZAJEDNIČKA FUNKCIJA ZA OBRAČUN SMENE
+function obracunajSmenePro(smene, radnik) {
   let ukupnoSati = 0; let nocniSati = 0; let praznicniSati = 0; let satiGO = 0; let satiBolovanje = 0;
 
   smene.forEach(smena => {
@@ -174,7 +174,7 @@ function izracunajStatistikuSmena(smene, radnik) {
   };
 }
 
-// === MESEČNI IZVEŠTAJ ===
+// === MESEČNI OBRAČUN ===
 app.get('/izvestaj/:id', (req, res) => {
   const radnikId = req.params.id;
   const mesec = parseInt(req.query.mesec);
@@ -184,25 +184,28 @@ app.get('/izvestaj/:id', (req, res) => {
     if (err || !radnikRes || radnikRes.length === 0) return res.status(404).json({ poruka: "Radnik nije nađen" });
     
     const radnik = radnikRes[0];
-    const qSmene = 'SELECT * FROM raspored WHERE zaposleni_id = ? AND MONTH(datum) = ? AND YEAR(datum) = ?';
-    
-    db.query(qSmene, [radnikId, mesec, godina], (err, smene) => {
+    db.query('SELECT * FROM raspored WHERE zaposleni_id = ?', [radnikId], (err, sveSmene) => {
       if (err) return res.status(500).json({ greska: err.message });
       
-      const statistika = izracunajStatistikuSmena(Array.isArray(smene) ? smene : [], radnik);
+      const filtrirane = (sveSmene || []).filter(s => {
+        const d = new Date(s.datum);
+        return (d.getMonth() + 1) === mesec && d.getFullYear() === godina;
+      });
+
+      const stats = obracunajSmenePro(filtrirane, radnik);
       res.json({
         satnica: radnik.satnica,
         nocniBonus: radnik.nocni_bonus,
         praznikBonus: radnik.praznik_bonus,
         goProcenat: radnik.go_procenat,
         bolovanjeProcenat: radnik.bolovanje_procenat,
-        ...statistika
+        ...stats
       });
     });
   });
 });
 
-// === NOVO: GODIŠNJI IZVEŠTAJ ===
+// === SIGURAN GODIŠNJI OBRAČUN ===
 app.get('/godisnji-izvestaj/:id', (req, res) => {
   const radnikId = req.params.id;
   const godina = parseInt(req.query.godina);
@@ -211,18 +214,18 @@ app.get('/godisnji-izvestaj/:id', (req, res) => {
     if (err || !radnikRes || radnikRes.length === 0) return res.status(404).json({ poruka: "Radnik nije nađen" });
     
     const radnik = radnikRes[0];
-    const qSmene = 'SELECT * FROM raspored WHERE zaposleni_id = ? AND YEAR(datum) = ?';
-    
-    db.query(qSmene, [radnikId, godina], (err, smene) => {
+    db.query('SELECT * FROM raspored WHERE zaposleni_id = ?', [radnikId], (err, sveSmene) => {
       if (err) return res.status(500).json({ greska: err.message });
       
-      const sigurneSmene = Array.isArray(smene) ? smene : [];
+      const sigurneSmene = Array.isArray(sveSmene) ? sveSmene : [];
       let poMesecima = Array(12).fill(0).map((_, i) => ({ mesec: i + 1, sati: 0, zarada: 0 }));
       
-      // Filtriramo sate i zaradu po svakom mesecu pojedinačno
       poMesecima = poMesecima.map(m => {
-        const smeneZaMesec = sigurneSmene.filter(s => new Date(s.datum).getMonth() + 1 === m.mesec);
-        const stats = izracunajStatistikuSmena(smeneZaMesec, radnik);
+        const smeneZaMesec = sigurneSmene.filter(s => {
+          const d = new Date(s.datum);
+          return (d.getMonth() + 1) === m.mesec && d.getFullYear() === godina;
+        });
+        const stats = obracunajSmenePro(smeneZaMesec, radnik);
         return { mesec: m.mesec, sati: stats.ukupnoSati + stats.satiGO + stats.satiBolovanje, zarada: stats.plata };
       });
 
